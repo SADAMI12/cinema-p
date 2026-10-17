@@ -2,231 +2,218 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<meta name="referrer" content="strict-origin-when-cross-origin">
-<title>Cinema System Player</title>
-<!--
-  مشغّل الفيديو الذي يُعرض على الشاشة (DUI).
-  - الروابط المباشرة: تعمل من داخل المورد (nui://cinema_system/html/player.html).
-  - يوتيوب: يلزم رفع هذا الملف نفسه على استضافة https ووضع رابطه في Config.Video.YoutubePlayerPage
-    لأن يوتيوب يرفض التضمين بدون Referer (Error 153).
-  الأمان: لا نستخدم innerHTML أبداً، والنصوص تُعرض بـ textContent، ومعرّف يوتيوب يُتحقق منه (11 خانة).
--->
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { width: 100%; height: 100%; overflow: hidden; background: #03050a; color: #e6f6ff; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; }
-video, iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #000; display: none; }
-video { object-fit: contain; }
-#idle { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2vh;
-  background: radial-gradient(ellipse at 50% 40%, #0b1a33 0%, #05080f 70%); }
-.ring { width: 18vh; height: 18vh; border-radius: 50%; border: .5vh solid rgba(34,211,238,.4); box-shadow: 0 0 5vh rgba(34,211,238,.3); display: flex; align-items: center; justify-content: center; }
-.ring::after { content: ''; border-left: 5.6vh solid #22d3ee; border-top: 3.4vh solid transparent; border-bottom: 3.4vh solid transparent; transform: translateX(-.6vh) scaleX(-1); }
-.name { font-size: 6vh; letter-spacing: .5vh; background: linear-gradient(90deg, #22d3ee, #a78bfa, #f472b6); -webkit-background-clip: text; color: transparent; }
-#banner { position: absolute; bottom: 7%; right: 5%; max-width: 70%; padding: 1.4vh 3vh; border-radius: 1.4vh; font-size: 3.6vh;
-  background: rgba(5,10,20,.8); border: 1px solid rgba(34,211,238,.45); opacity: 0; transition: opacity .6s; pointer-events: none; z-index: 5; }
-#banner.show { opacity: 1; }
-#error { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 6vh;
-  font-size: 4.4vh; line-height: 1.6; background: rgba(60,6,14,.92); color: #ffd7dc; z-index: 6; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cinema System</title>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div id="idle"><div class="ring"></div><div class="name">CINEMA SYSTEM</div></div>
-<video id="v" playsinline></video>
-<iframe id="yt" allow="autoplay; encrypted-media" referrerpolicy="strict-origin-when-cross-origin"></iframe>
-<div id="banner"></div>
-<div id="error"></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
-<script>
-(function () {
-  const idle = document.getElementById('idle');
-  const v = document.getElementById('v');
-  const yt = document.getElementById('yt');
-  const banner = document.getElementById('banner');
-  const errBox = document.getElementById('error');
+<!-- =================== الريموت (جهاز تحكم بيد اللاعب) =================== -->
+<div id="remote" class="overlay hidden">
+  <div class="remote-body">
+    <div class="r-top">
+      <button class="r-x" data-ui="close" title="إغلاق (Esc)">✕</button>
+      <div class="r-brand"><span id="rLed" class="led"></span> CINEMA</div>
+    </div>
 
-  let ctx = { resource: null, screen: null };
-  let cur = { rev: null, kind: null, src: '', status: 'idle' };
-  let target = null;           // آخر حالة مطلوبة { pos, at, status }
-  let hls = null;
-  let volume = 0, muted = false;
-  let bannerTimer = null;
+    <div class="r-display">
+      <div class="r-selector">
+        <button class="r-sel" data-r="nextScreen" title="الشاشة التالية">▶</button>
+        <div class="r-sname" id="rName">—</div>
+        <button class="r-sel" data-r="prevScreen" title="الشاشة السابقة">◀</button>
+      </div>
+      <div class="r-title" id="rTitle">لا يوجد تشغيل</div>
+      <div class="r-time" id="rTime">00:00</div>
+      <div class="r-status" id="rStatus">متوقف</div>
+    </div>
 
-  // ---------- إبلاغ اللعبة (أفضل جهد؛ إن فشل فالرسالة تظهر على الشاشة نفسها) ----------
-  function report(event, message) {
-    if (!ctx.resource) return;
-    try {
-      fetch('https://' + ctx.resource + '/playerEvent', {
-        method: 'POST', mode: 'no-cors',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event: event, message: message, screen: ctx.screen })
-      }).catch(function () {});
-    } catch (e) {}
-  }
+    <div class="r-scope" id="rScope">
+      <button data-scope="shared" id="scopeShared">للجميع</button>
+      <button data-scope="local" id="scopeLocal" class="active">لي فقط</button>
+    </div>
+    <div class="r-hint" id="rHint">الصوت والكتم هنا يؤثران عليك فقط.</div>
 
-  function fail(msg) {
-    errBox.textContent = msg;           // textContent فقط (آمن)
-    errBox.style.display = 'flex';
-    report('error', msg);
-  }
-  function clearError() { errBox.style.display = 'none'; errBox.textContent = ''; }
+    <div class="r-pad">
+      <button class="r-btn" data-r="power" id="bPower" title="إيقاف المحتوى / إخفاء الشاشة">⏻</button>
+      <button class="r-btn small" data-r="volup" id="bVolUp">VOL ＋</button>
+      <button class="r-btn" data-r="mute" id="bMute" title="كتم / إلغاء الكتم">🔇</button>
 
-  function show(which) {
-    idle.style.display = which === 'idle' ? 'flex' : 'none';
-    v.style.display = which === 'video' ? 'block' : 'none';
-    yt.style.display = which === 'yt' ? 'block' : 'none';
-  }
+      <button class="r-btn" data-r="back" id="bBack">⏪ <small id="lblBack">10</small></button>
+      <button class="r-btn play" data-r="toggle" id="bToggle">▶</button>
+      <button class="r-btn" data-r="fwd" id="bFwd"><small id="lblFwd">10</small> ⏩</button>
 
-  function ytCmd(func, args) {
-    try { yt.contentWindow.postMessage(JSON.stringify({ event: 'command', func: func, args: args || [] }), '*'); } catch (e) {}
-  }
+      <button class="r-btn small" data-r="link" id="bLink" title="تشغيل رابط">🔗</button>
+      <button class="r-btn small" data-r="voldown" id="bVolDown">VOL －</button>
+      <button class="r-btn small" data-r="hide" id="bHide" title="إخفاء/إظهار هذه الشاشة لي فقط">👁</button>
+    </div>
 
-  function applyVolume() {
-    v.volume = Math.max(0, Math.min(1, volume / 100));
-    v.muted = muted;
-    if (cur.kind === 'youtube') {
-      ytCmd('setVolume', [volume]);
-      ytCmd(muted ? 'mute' : 'unMute');
-    }
-  }
+    <div class="r-vol"><div class="r-vol-bar" id="rVolBar"></div><span id="rVolTxt">70%</span></div>
 
-  function clearAll() {
-    try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) {}
-    if (hls) { hls.destroy(); hls = null; }
-    yt.src = 'about:blank';
-    cur = { rev: null, kind: null, src: '', status: 'idle' };
-    target = null;
-    clearError();
-    show('idle');
-  }
+    <div class="r-link hidden" id="rLink">
+      <input id="rUrl" type="text" dir="ltr" placeholder="https://..." autocomplete="off">
+      <button class="primary small" data-r="playUrl">تشغيل</button>
+    </div>
+    <div class="r-note" id="rNote"></div>
+  </div>
+</div>
 
-  function showBanner(t) {
-    if (!t) return;
-    banner.textContent = t;
-    banner.classList.add('show');
-    clearTimeout(bannerTimer);
-    bannerTimer = setTimeout(function () { banner.classList.remove('show'); }, 6000);
-  }
+<!-- =================== لوحة الإدارة =================== -->
+<div id="admin" class="overlay hidden">
+  <div id="win" class="win">
+    <header id="drag" class="win-head">
+      <div class="brand"><span class="logo">▶</span>
+        <div class="brand-text"><b>Cinema System</b><small>لوحة الإدارة</small></div></div>
+      <div class="head-tools">
+        <button class="icon-btn" data-ui="zoomout" title="تصغير الواجهة">−</button>
+        <span id="zoomLabel" class="zoom-label">100%</span>
+        <button class="icon-btn" data-ui="zoomin" title="تكبير الواجهة">+</button>
+        <button class="icon-btn close" data-ui="close" title="إغلاق (Esc)">✕</button>
+      </div>
+    </header>
 
-  function expected() {
-    if (!target) return 0;
-    let p = target.pos + (target.status === 'playing' ? (Date.now() - target.at) / 1000 : 0);
-    return Math.max(0, p);
-  }
+    <nav id="tabs" class="tabs">
+      <button data-tab="screens" class="active">▣ الشاشات</button>
+      <button data-tab="play">▶ بحث وتشغيل</button>
+      <button data-tab="library">★ المكتبة</button>
+    </nav>
 
-  function syncVideo(hard) {
-    if (!target || cur.kind === 'youtube') return;
-    const want = expected();
-    if (v.readyState >= 1) {
-      if (hard || Math.abs(v.currentTime - want) > 2.5) {
-        if (!isFinite(v.duration) || want < v.duration) v.currentTime = want;
-      }
-    }
-    if (target.status === 'playing') {
-      if (v.paused) {
-        const pr = v.play();
-        if (pr && pr.catch) pr.catch(function () { v.muted = true; v.play().catch(function () {}); });
-      }
-    } else if (!v.paused) {
-      v.pause();
-    }
-  }
+    <main class="body">
+      <!-- الشاشات -->
+      <section id="tab-screens" class="tab active">
+        <div id="bulkBar" class="bulk hidden"></div>
+        <div id="screensList" class="list"></div>
+        <div class="form-card">
+          <h4>إضافة شاشة جديدة</h4>
+          <p class="note-s">لتحريك شاشة موجودة استخدم زر «✥ تحريك وتكبير» بجانبها. هذا النموذج يُنشئ شاشة جديدة فقط، وستظهر معاينة قبل الحفظ.</p>
+          <div class="form-grid">
+            <input id="newName" type="text" placeholder="اسم الشاشة">
+            <select id="newType"></select>
+            <label class="mini">العرض (م)<input id="newW" type="number" step="0.5" min="0.5"></label>
+            <label class="mini">الارتفاع (م)<input id="newH" type="number" step="0.5" min="0.5"></label>
+          </div>
+          <button class="primary" data-act="startAdd">فتح المحرر ووضع الشاشة</button>
+        </div>
+      </section>
 
-  function syncYoutube(hard) {
-    if (!target || cur.kind !== 'youtube') return;
-    ytCmd(target.status === 'playing' ? 'playVideo' : 'pauseVideo');
-    if (hard) ytCmd('seekTo', [expected(), true]);
-    applyVolume();
-  }
+      <!-- بحث وتشغيل -->
+      <section id="tab-play" class="tab">
+        <div class="picker"><label for="playScreen">الشاشة</label><select id="playScreen"></select></div>
+        <div class="url-card">
+          <label for="url">تشغيل رابط</label>
+          <div class="url-row">
+            <input id="url" type="text" dir="ltr" placeholder="https://... (فيديو مباشر أو YouTube)" autocomplete="off">
+            <button class="primary" data-act="playUrl">تشغيل</button>
+          </div>
+          <input id="urlTitle" type="text" placeholder="عنوان يظهر على الشاشة (اختياري)" autocomplete="off">
+        </div>
+        <div class="url-card">
+          <label for="ytQuery">البحث في YouTube</label>
+          <div class="url-row">
+            <input id="ytQuery" type="text" placeholder="ابحث عن فيديو..." autocomplete="off">
+            <button class="primary" data-act="search">بحث</button>
+          </div>
+          <div id="ytStatus" class="note-s"></div>
+          <div id="ytResults" class="results"></div>
+        </div>
+      </section>
 
-  function load(m) {
-    clearError();
-    cur.kind = m.kind; cur.src = m.src;
-    if (hls) { hls.destroy(); hls = null; }
+      <!-- المكتبة -->
+      <section id="tab-library" class="tab">
+        <div id="libList" class="list"></div>
+        <div class="form-card">
+          <h4>إضافة رابط إلى المكتبة</h4>
+          <div class="form-grid">
+            <input id="libTitle" type="text" placeholder="العنوان">
+            <input id="libCat" type="text" placeholder="التصنيف (مثال: أفلام)">
+          </div>
+          <input id="libUrl" type="text" dir="ltr" placeholder="https://...">
+          <button class="primary" data-act="saveLib">حفظ في المكتبة</button>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
 
-    if (m.kind === 'youtube') {
-      if (!/^[\w-]{11}$/.test(String(m.src))) { fail('معرّف فيديو يوتيوب غير صالح.'); return; }
-      try { v.pause(); v.removeAttribute('src'); } catch (e) {}
-      yt.src = 'https://www.youtube-nocookie.com/embed/' + m.src +
-        '?autoplay=1&controls=0&disablekb=1&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&start=' + Math.floor(m.position || 0);
-      show('yt');
-      yt.onload = function () {
-        try { yt.contentWindow.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), '*'); } catch (e) {}
-      };
-      setTimeout(function () { syncYoutube(false); }, 2500);
-      return;
-    }
+<!-- =================== نافذة (تأكيد / تعديل الاسم) =================== -->
+<div id="modal" class="modal hidden"><div class="modal-card" id="modalCard"></div></div>
 
-    if (!/^https?:\/\/[^\s]+$/.test(String(m.src))) { fail('رابط الفيديو غير صالح.'); return; }
-    yt.src = 'about:blank';
-    if (/\.m3u8(\?|$)/i.test(m.src)) {
-      if (window.Hls && Hls.isSupported()) {
-        hls = new Hls();
-        hls.on(Hls.Events.ERROR, function (e, data) { if (data && data.fatal) fail('تعذر تشغيل بث m3u8.'); });
-        hls.loadSource(m.src);
-        hls.attachMedia(v);
-      } else {
-        fail('تشغيل m3u8 يحتاج مكتبة hls.js (لم تُحمَّل من الإنترنت).');
-        return;
-      }
-    } else {
-      v.src = m.src;
-    }
-    show('video');
-    applyVolume();
-  }
+<!-- =================== لوحة المحرر =================== -->
+<div id="editor" class="editor hidden">
+  <div class="ed-panel">
+    <div class="ed-head"><b>محرر الشاشة</b><span id="edName" class="ed-name"></span></div>
 
-  const VIDEO_ERRORS = {
-    1: 'تم إلغاء التحميل.', 2: 'خطأ في الشبكة أو الرابط لا يستجيب.',
-    3: 'تعذر فك ترميز الفيديو.', 4: 'صيغة الفيديو غير مدعومة أو الرابط لا يشير إلى ملف فيديو.'
-  };
-  v.addEventListener('error', function () {
-    const code = v.error ? v.error.code : 0;
-    fail(VIDEO_ERRORS[code] || 'تعذر تشغيل الفيديو.');
-  });
-  v.addEventListener('loadedmetadata', function () { syncVideo(true); });
-  v.addEventListener('canplay', function () { syncVideo(false); });
-  v.addEventListener('playing', function () { clearError(); report('playing', ''); });
+    <div class="ed-main">
+      <button class="save" data-ed="save">💾 حفظ <kbd>Enter</kbd></button>
+      <button class="cancel" data-ed="cancel">إلغاء <kbd>Backspace</kbd></button>
+    </div>
 
-  function onState(m) {
-    if (!m.src || m.status === 'idle') { if (cur.kind) clearAll(); return; }
-    const sameMedia = (cur.src === m.src && cur.kind === m.kind && m.kind !== 'youtube');
-    const revChanged = cur.rev !== m.rev;
-    target = { pos: m.position || 0, at: Date.now(), status: m.status };
+    <div class="seg small" id="edSpeed">
+      <button data-speed="precision">دقيق</button>
+      <button data-speed="normal" class="active">عادي</button>
+      <button data-speed="fast">سريع</button>
+    </div>
 
-    if (revChanged && !sameMedia) {          // محتوى جديد
-      cur.rev = m.rev;
-      load(m);
-      showBanner(m.title);
-      cur.status = m.status;
-      return;
-    }
-    if (revChanged) {                        // تقديم/تأخير على نفس الفيديو
-      cur.rev = m.rev;
-      if (cur.kind === 'youtube') syncYoutube(true); else syncVideo(true);
-      cur.status = m.status;
-      return;
-    }
-    if (cur.kind === 'youtube') syncYoutube(cur.status !== m.status); else syncVideo(cur.status !== m.status);
-    cur.status = m.status;
-  }
+    <div class="group">
+      <h5>تحريك الشاشة <small>الأسهم + PageUp/PageDown</small></h5>
+      <div class="pad">
+        <button data-hold="pgup">⬆ رفع</button>
+        <button data-hold="up">▲ أمام</button>
+        <button data-hold="pgdn">⬇ خفض</button>
+        <button data-hold="left">◀ يسار</button>
+        <span class="dot">✥</span>
+        <button data-hold="right">يمين ▶</button>
+        <span></span>
+        <button data-hold="down">▼ خلف</button>
+        <span></span>
+      </div>
+    </div>
 
-  window.addEventListener('message', function (e) {
-    let d = e.data;
-    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) { return; } }
-    if (!d) return;
+    <div class="group">
+      <h5>تكبير / تصغير <small>عجلة الماوس</small></h5>
+      <div class="row2">
+        <button class="big" data-hold="zoomin">＋ تكبير</button>
+        <button class="big" data-hold="zoomout">－ تصغير</button>
+      </div>
+    </div>
 
-    // أحداث مشغّل يوتيوب (تصل بعد رسالة listening)
-    if (d.event === 'onError') { fail('تعذر تشغيل فيديو يوتيوب (غير متاح للتضمين أو محذوف). رمز: ' + d.info); return; }
-    if (!d.type) return;
+    <div class="group">
+      <h5>تدوير <small>اضغط R مع الأسهم</small></h5>
+      <div class="row4">
+        <button data-hold="rotl">⟲ يسار</button>
+        <button data-hold="rotr">يمين ⟳</button>
+        <button data-hold="tiltup">ميل ▲</button>
+        <button data-hold="tiltdn">ميل ▼</button>
+      </div>
+    </div>
 
-    if (d.type === 'init') { ctx.resource = String(d.resource || '').replace(/[^\w-]/g, ''); ctx.screen = d.screen; }
-    else if (d.type === 'state') onState(d);
-    else if (d.type === 'volume') { volume = Number(d.volume) || 0; muted = d.muted === true; applyVolume(); }
-    else if (d.type === 'clear') clearAll();
-  });
+    <div class="readout">
+      <div><em>الموقع</em><span>X <b id="rX">0</b></span><span>Y <b id="rY">0</b></span><span>Z <b id="rZ">0</b></span></div>
+      <div><em>الدوران</em><span>P <b id="rRX">0</b></span><span>R <b id="rRY">0</b></span><span>Y <b id="rRZ">0</b></span></div>
+      <div><em>الحجم</em><span>عرض <b id="rW">0</b></span><span>ارتفاع <b id="rH">0</b></span></div>
+    </div>
 
-  show('idle');
-})();
-</script>
+    <div class="ed-actions">
+      <button data-ed="snap">التصاق بجدار <kbd>G</kbd></button>
+      <button data-ed="reset">تصفير الميل <kbd>H</kbd></button>
+      <button data-ed="undo">↶ تراجع <kbd>Z</kbd></button>
+      <button data-ed="redo">↷ إعادة <kbd>Y</kbd></button>
+      <button data-ed="copy">نسخ</button>
+      <button data-ed="delete" class="danger">حذف</button>
+      <button id="lockBtn" class="toggle active" data-ed="lock">🔒 قفل النسبة</button>
+      <button id="cursorBtn" class="toggle" data-ed="cursor">🖱 نظر حر <kbd>TAB</kbd></button>
+    </div>
+
+    <div class="help">
+      <b>النظر:</b> اضغط <b>الزر الأيمن</b> مع تحريك الماوس · W A S D للطيران · Q نزول · E صعود<br>
+      <b>الحجم:</b> عجلة الماوس · أو اضغط <b>C</b> مع الأسهم (بعد فك قفل النسبة)<br>
+      <b>Shift</b> سريع · <b>Alt</b> دقيق · <b>TAB</b> نظر حر بدون مؤشر (للعودة اضغط TAB)
+    </div>
+  </div>
+</div>
+
+<div id="hint" class="hint hidden"><kbd>E</kbd> ريموت السنما</div>
+<div id="toasts" class="toasts"></div>
+
+<script src="app.js"></script>
 </body>
 </html>
